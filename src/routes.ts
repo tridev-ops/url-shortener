@@ -14,16 +14,19 @@ if (!redisUrl) {
 }
 const redis = new Redis(redisUrl);
 
-
 const shortenSchema = {
-    body: {
-        type: "object",
-        required: ["url"],
-        properties: {
-            url: { type: "string", minLength: 1 },
-        },
-        additionalProperties: false,
+  body: {
+    type: "object",
+    required: ["url"],
+    properties: {
+      url: { type: "string", minLength: 1 },
+      customCode: {
+        type: "string",
+        pattern: "^[a-zA-Z0-9_-]{3,20}$",
+      },
     },
+    additionalProperties: false,
+  },
 };
 
 function generateCode(byteLength = 4): string {
@@ -40,9 +43,9 @@ function isLinkAlreadyExists(originalUrl: string): Promise<boolean> {
     return db.select().from(links).where(eq(links.originalUrl, originalUrl)).limit(1).then(result => result.length > 0);
 }
 
-async function createShortLink(originalUrl: string, maxRetries = 5) {
+async function createShortLink(originalUrl: string, customCode: string | undefined, maxRetries = 5) {
     for (let attempt = 0; attempt < maxRetries; attempt++) {
-        const code = generateCode(4);
+        const code = customCode || generateCode(4);
 
         try {
             // Check if the original URL already exists in the database
@@ -60,6 +63,11 @@ async function createShortLink(originalUrl: string, maxRetries = 5) {
 
             return inserted;
         } catch (err) {
+            if (customCode && getPgErrorCode(err) === "23505") {
+                // If a custom code is provided and there's a uniqueness violation, throw an error
+                throw new Error("Custom code is already in use");
+            }
+            
             if (getPgErrorCode(err) === "23505") {
                 continue; // Collision on `code` — generate a new one and retry
             }
@@ -93,7 +101,7 @@ export default function routes(fastify: FastifyInstance) {
             },
         },
     }, async (request, reply) => {
-        const { url } = request.body as { url: string };
+        const { url, customCode } = request.body as { url: string; customCode: string | undefined };
 
         // Check if url is valid
         let parsedUrl: URL;
@@ -106,7 +114,7 @@ export default function routes(fastify: FastifyInstance) {
             return reply.code(400).send({ error: "Invalid URL" });
         }
 
-        const link = await createShortLink(url)
+        const link = await createShortLink(url, customCode);
         const shortUrl = buildShortUrl(link.code);
         return reply.code(201).send({
             code: link.code,
@@ -155,5 +163,21 @@ export default function routes(fastify: FastifyInstance) {
 
         // Redirect to original url
         return reply.redirect(originalUrl)
+    })
+
+    fastify.get("/:code/stats", async (request, reply) => {
+        const { code } = request.params as { code: string }
+
+        const link = await db.select().from(links).where(eq(links.code, code)).limit(1)
+
+        if (link.length === 0) {
+            return reply.code(404).send({ error: 'Link not found' })
+        }
+
+        return reply.send({
+            code: link[0].code,
+            originalUrl: link[0].originalUrl,
+            clicks: link[0].clicks,
+        })
     })
 }
