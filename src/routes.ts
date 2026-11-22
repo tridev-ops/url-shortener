@@ -6,12 +6,14 @@ import { db } from "./db"
 import { links } from './db/schema'
 import Redis from 'ioredis'
 import 'dotenv/config'
+import rateLimit from "@fastify/rate-limit";
 
 const redisUrl = process.env.REDIS_URL;
 if (!redisUrl) {
     throw new Error("REDIS_URL is not configured");
 }
 const redis = new Redis(redisUrl);
+
 
 const shortenSchema = {
     body: {
@@ -76,7 +78,21 @@ function buildShortUrl(code: string): string {
 }
 
 export default function routes(fastify: FastifyInstance) {
-    fastify.post("/shorten", { schema: shortenSchema }, async (request, reply) => {
+    // Register the plugin on this Fastify instance before defining routes.
+    fastify.register(rateLimit, {
+        global: false,
+        redis,
+    });
+
+    fastify.post("/shorten", {
+        schema: shortenSchema, config: {
+            rateLimit: {
+                max: 20, // max requests per window
+                timeWindow: "1 minute",
+                keyGenerator: (request) => `rate:shorten:${request.ip}`,
+            },
+        },
+    }, async (request, reply) => {
         const { url } = request.body as { url: string };
 
         // Check if url is valid
@@ -112,21 +128,24 @@ export default function routes(fastify: FastifyInstance) {
         }
 
         if (originalUrl === null) {
+            console.log(`Cache miss for code: ${code}, fetching from DB`);
             // Fetch url from db
             const link = await db.select().from(links).where(eq(links.code, code)).limit(1)
-    
+
             if (link.length === 0) {
                 return reply.code(404).send({ error: 'Link not found' })
             }
 
             originalUrl = link[0].originalUrl
-    
+
             // Cache the URL in Redis for 1 hour (3600 seconds) on a cache miss
             try {
                 await redis.set(cacheKey, link[0].originalUrl, "EX", 3600);
             } catch (err) {
                 request.log.warn({ err, cacheKey }, "Redis SET failed, continuing redirect");
             }
+        } else {
+            console.log(`Cache hit for code: ${code}, redirecting to ${originalUrl}`);
         }
 
         // Increment clicks
@@ -134,7 +153,7 @@ export default function routes(fastify: FastifyInstance) {
             .set({ clicks: sql`${links.clicks} + 1` })
             .where(eq(links.code, code))
 
-        // Redirect to orignal url
+        // Redirect to original url
         return reply.redirect(originalUrl)
     })
 }

@@ -2,5 +2,5 @@ POST http://localhost:3000/shorten
 Content-Type: application/json
 
 {
-  "url": "https://aniwaves.tv"
+  "url": "http://example.com"
 }
