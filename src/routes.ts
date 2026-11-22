@@ -1,8 +1,17 @@
 import { randomBytes } from 'node:crypto'
 import { FastifyInstance } from 'fastify'
+import "dotenv/config";
 import { eq, sql } from 'drizzle-orm'
 import { db } from "./db"
 import { links } from './db/schema'
+import Redis from 'ioredis'
+import 'dotenv/config'
+
+const redisUrl = process.env.REDIS_URL;
+if (!redisUrl) {
+    throw new Error("REDIS_URL is not configured");
+}
+const redis = new Redis(redisUrl);
 
 const shortenSchema = {
     body: {
@@ -52,12 +61,18 @@ async function createShortLink(originalUrl: string, maxRetries = 5) {
             if (getPgErrorCode(err) === "23505") {
                 continue; // Collision on `code` — generate a new one and retry
             }
-            
+
             throw err; // Any other error (connection, syntax, etc.) should fail immediately
         }
     }
 
     throw new Error("Failed to generate a unique short code after max retries");
+}
+
+function buildShortUrl(code: string): string {
+    const rawBase = process.env.APP_URL || `http://localhost:${process.env.PORT || 3000}`;
+    const normalizedBase = rawBase.endsWith("/") ? rawBase : `${rawBase}/`;
+    return new URL(code, normalizedBase).toString();
 }
 
 export default function routes(fastify: FastifyInstance) {
@@ -76,17 +91,42 @@ export default function routes(fastify: FastifyInstance) {
         }
 
         const link = await createShortLink(url)
-        reply.code(201).send({ link })
+        const shortUrl = buildShortUrl(link.code);
+        return reply.code(201).send({
+            code: link.code,
+            shortUrl,
+        });
     });
 
     fastify.get("/:code", async (request, reply) => {
         const { code } = request.params as { code: string }
 
-        // Fetch url from db
-        const link = await db.select().from(links).where(eq(links.code, code)).limit(1)
+        const cacheKey = `url:${code}`;
+        let originalUrl: string | null = null;
 
-        if (link.length === 0) {
-            return reply.code(404).send({ error: 'Link not found' })
+        try {
+            originalUrl = await redis.get(cacheKey);
+        } catch (err) {
+            // If Redis is unreachable or times out, don't fail the redirect—fall back to Postgres
+            request.log.warn({ err, cacheKey }, "Redis GET failed, falling back to DB");
+        }
+
+        if (originalUrl === null) {
+            // Fetch url from db
+            const link = await db.select().from(links).where(eq(links.code, code)).limit(1)
+    
+            if (link.length === 0) {
+                return reply.code(404).send({ error: 'Link not found' })
+            }
+
+            originalUrl = link[0].originalUrl
+    
+            // Cache the URL in Redis for 1 hour (3600 seconds) on a cache miss
+            try {
+                await redis.set(cacheKey, link[0].originalUrl, "EX", 3600);
+            } catch (err) {
+                request.log.warn({ err, cacheKey }, "Redis SET failed, continuing redirect");
+            }
         }
 
         // Increment clicks
@@ -95,6 +135,6 @@ export default function routes(fastify: FastifyInstance) {
             .where(eq(links.code, code))
 
         // Redirect to orignal url
-        return reply.redirect(link[0].originalUrl)
+        return reply.redirect(originalUrl)
     })
 }

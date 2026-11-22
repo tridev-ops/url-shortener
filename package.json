@@ -13,16 +13,17 @@
   "devEngines": {
     "packageManager": {
       "name": "pnpm",
-      "version": "11.23.0",
+      "version": "12.21.0",
       "onFail": "download"
     }
   },
-  "packageManager": "pnpm@11.23.0",
+  "packageManager": "pnpm@12.21.0",
   "type": "module",
   "dependencies": {
     "dotenv": "^18.0.10",
     "drizzle-orm": "^0.45.4",
     "fastify": "^5.12.8",
+    "ioredis": "^6.0.0",
     "pg": "^8.23.1"
   },
   "devDependencies": {
