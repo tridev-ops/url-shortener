@@ -2,5 +2,5 @@ POST http://localhost:3000/shorten
 Content-Type: application/json
 
 {
-  "url": "https://aniwaves.tv/watch/black-clover-2nd-season-82769/ep-1"
+  "url": "https://aniwaves.tv"
 }
